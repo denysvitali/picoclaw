@@ -95,7 +95,7 @@ builds:
         goarch: arm
 
 dockers_v2:
-  - id: picoclaw
+  - id: picoclaw-amd64
     dockerfile: docker/Dockerfile.goreleaser
     extra_files:
       - docker/entrypoint.sh
@@ -105,12 +105,50 @@ dockers_v2:
       - "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/picoclaw"
       - "docker.io/{{ .Env.DOCKERHUB_IMAGE_NAME }}"
     tags:
-      - "{{ .Tag }}"
-      - "latest"
+      - "{{ .Tag }}-amd64"
     platforms:
       - linux/amd64
+    skip_push: "{{ if eq .Runtime.Goarch \"amd64\" }}false{{ else }}true{{ end }}"
+
+  - id: picoclaw-arm64
+    dockerfile: docker/Dockerfile.goreleaser
+    extra_files:
+      - docker/entrypoint.sh
+    ids:
+      - picoclaw
+    images:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/picoclaw"
+      - "docker.io/{{ .Env.DOCKERHUB_IMAGE_NAME }}"
+    tags:
+      - "{{ .Tag }}-arm64"
+    platforms:
       - linux/arm64
-      - linux/riscv64
+    skip_push: "{{ if eq .Runtime.Goarch \"arm64\" }}false{{ else }}true{{ end }}"
+
+docker_manifests:
+  - name_template: "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/picoclaw:{{ .Tag }}"
+    image_templates:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/picoclaw:{{ .Tag }}-amd64"
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/picoclaw:{{ .Tag }}-arm64"
+    skip_push: false
+
+  - name_template: "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/picoclaw:latest"
+    image_templates:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/picoclaw:{{ .Tag }}-amd64"
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY_OWNER }}/picoclaw:{{ .Tag }}-arm64"
+    skip_push: false
+
+  - name_template: "docker.io/{{ .Env.DOCKERHUB_IMAGE_NAME }}:{{ .Tag }}"
+    image_templates:
+      - "docker.io/{{ .Env.DOCKERHUB_IMAGE_NAME }}:{{ .Tag }}-amd64"
+      - "docker.io/{{ .Env.DOCKERHUB_IMAGE_NAME }}:{{ .Tag }}-arm64"
+    skip_push: false
+
+  - name_template: "docker.io/{{ .Env.DOCKERHUB_IMAGE_NAME }}:latest"
+    image_templates:
+      - "docker.io/{{ .Env.DOCKERHUB_IMAGE_NAME }}:{{ .Tag }}-amd64"
+      - "docker.io/{{ .Env.DOCKERHUB_IMAGE_NAME }}:{{ .Tag }}-arm64"
+    skip_push: false
 
 archives:
   - formats: [tar.gz]

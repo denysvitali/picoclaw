@@ -1,0 +1,28 @@
+name: CI - Docker Build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  prepare:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      short_sha: ${{ steps.sha.outputs.short }}
+    steps:
+      - id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  docker:
+    needs: prepare
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      tag: sha-${{ needs.prepare.outputs.short_sha }}
+      ref: ${{ github.sha }}
+      push_dockerhub: false
+    permissions:
+      contents: read
+      packages: write
