@@ -270,7 +270,10 @@ func (c *TelegramChannel) EditMessage(ctx context.Context, chatID string, messag
 	htmlContent := markdownToTelegramHTML(content)
 	editMsg := tu.EditMessageText(tu.ID(cid), mid, htmlContent)
 	editMsg.ParseMode = telego.ModeHTML
-	_, err = c.bot.EditMessageText(ctx, editMsg)
+	if _, err = c.bot.EditMessageText(ctx, editMsg); err != nil {
+		editMsg.ParseMode = ""
+		_, err = c.bot.EditMessageText(ctx, editMsg)
+	}
 	return err
 }
 
