@@ -44,8 +44,11 @@ type TelegramChannel struct {
 	bh      *th.BotHandler
 	config  *config.Config
 	chatIDs map[string]int64
-	ctx     context.Context
-	cancel  context.CancelFunc
+	// topicIDs maps senderID -> messageThreadID for per-user forum topic routing.
+	// Populated when Forum.CreateTopicPerUser is true.
+	topicIDs map[string]int
+	ctx      context.Context
+	cancel   context.CancelFunc
 
 	registerFunc     func(context.Context, []commands.Definition) error
 	commandRegCancel context.CancelFunc
@@ -98,6 +101,7 @@ func NewTelegramChannel(cfg *config.Config, bus *bus.MessageBus) (*TelegramChann
 		bot:         bot,
 		config:      cfg,
 		chatIDs:     make(map[string]int64),
+		topicIDs:    make(map[string]int),
 	}, nil
 }
 
@@ -430,6 +434,28 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 	chatID := message.Chat.ID
 	c.chatIDs[platformID] = chatID
 
+	// Determine the forum thread ID to use for the response.
+	// If create_topic_per_user is enabled, create/reuse a dedicated topic.
+	// Otherwise pass through whatever thread ID the incoming message carries.
+	threadID := 0
+	var forumCfg config.TelegramForumConfig
+	if c.config != nil {
+		forumCfg = c.config.Channels.Telegram.Forum
+	}
+	if forumCfg.CreateTopicPerUser && forumCfg.GroupID != "" {
+		tid, err := c.createOrGetTopic(c.ctx, forumCfg.GroupID, platformID, user.FirstName)
+		if err != nil {
+			logger.WarnCF("telegram", "Failed to get/create forum topic", map[string]any{
+				"user_id": platformID,
+				"error":   err.Error(),
+			})
+		} else {
+			threadID = tid
+		}
+	} else if message.MessageThreadID != 0 {
+		threadID = message.MessageThreadID
+	}
+
 	content := ""
 	mediaPaths := []string{}
 
@@ -549,8 +575,8 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 		"first_name": user.FirstName,
 		"is_group":   fmt.Sprintf("%t", message.Chat.Type != "private"),
 	}
-	if message.MessageThreadID != 0 {
-		metadata["thread_id"] = fmt.Sprintf("%d", message.MessageThreadID)
+	if threadID != 0 {
+		metadata["thread_id"] = fmt.Sprintf("%d", threadID)
 	}
 
 	c.HandleMessage(c.ctx,
@@ -564,6 +590,46 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 		sender,
 	)
 	return nil
+}
+
+// createOrGetTopic returns the MessageThreadID for senderID's dedicated forum topic,
+// creating it via the Telegram API if it doesn't exist yet.
+// groupChatID must be a valid integer chat ID string (e.g. "-1001234567890").
+func (c *TelegramChannel) createOrGetTopic(ctx context.Context, groupChatID, senderID, displayName string) (int, error) {
+	if tid, ok := c.topicIDs[senderID]; ok {
+		return tid, nil
+	}
+
+	gid, err := parseChatID(groupChatID)
+	if err != nil {
+		return 0, fmt.Errorf("invalid group_id %q: %w", groupChatID, err)
+	}
+
+	name := displayName
+	if name == "" {
+		name = senderID
+	}
+
+	params := &telego.CreateForumTopicParams{
+		ChatID: tu.ID(gid),
+		Name:   name,
+	}
+	if c.config.Channels.Telegram.Forum.TopicIconColor != 0 {
+		params.IconColor = c.config.Channels.Telegram.Forum.TopicIconColor
+	}
+
+	topic, err := c.bot.CreateForumTopic(ctx, params)
+	if err != nil {
+		return 0, fmt.Errorf("createForumTopic for %s: %w", senderID, err)
+	}
+
+	c.topicIDs[senderID] = topic.MessageThreadID
+	logger.InfoCF("telegram", "Created forum topic", map[string]any{
+		"user_id":           senderID,
+		"topic_name":        name,
+		"message_thread_id": topic.MessageThreadID,
+	})
+	return topic.MessageThreadID, nil
 }
 
 func (c *TelegramChannel) downloadPhoto(ctx context.Context, fileID string) string {

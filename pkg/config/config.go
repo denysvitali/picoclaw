@@ -269,7 +269,18 @@ type TelegramConfig struct {
 	GroupTrigger       GroupTriggerConfig  `json:"group_trigger,omitempty"`
 	Typing             TypingConfig        `json:"typing,omitempty"`
 	Placeholder        PlaceholderConfig   `json:"placeholder,omitempty"`
+	Forum              TelegramForumConfig `json:"forum,omitempty"`
 	ReasoningChannelID string              `json:"reasoning_channel_id"    env:"PICOCLAW_CHANNELS_TELEGRAM_REASONING_CHANNEL_ID"`
+}
+
+// TelegramForumConfig controls forum topic routing for Telegram supergroups.
+type TelegramForumConfig struct {
+	// CreateTopicPerUser creates a dedicated forum topic for each user.
+	CreateTopicPerUser bool `json:"create_topic_per_user" env:"PICOCLAW_CHANNELS_TELEGRAM_FORUM_CREATE_TOPIC_PER_USER"`
+	// GroupID is the chat ID of the forum-enabled supergroup (e.g. "-1001234567890").
+	GroupID string `json:"group_id" env:"PICOCLAW_CHANNELS_TELEGRAM_FORUM_GROUP_ID"`
+	// TopicIconColor is the color of the topic icon (Telegram API color enum).
+	TopicIconColor int `json:"topic_icon_color,omitempty" env:"PICOCLAW_CHANNELS_TELEGRAM_FORUM_TOPIC_ICON_COLOR"`
 }
 
 type FeishuConfig struct {
