@@ -324,6 +324,26 @@ func (c *TelegramChannel) SendPlaceholder(ctx context.Context, chatID string, th
 	return fmt.Sprintf("%d", pMsg.MessageID), nil
 }
 
+// StreamDraft implements channels.DraftStreamer.
+// It calls sendMessageDraft to show a live "draft bubble" in the user's chat.
+func (c *TelegramChannel) StreamDraft(ctx context.Context, chatID, threadID string, draftID int, text string) error {
+	cid, err := parseChatID(chatID)
+	if err != nil {
+		return err
+	}
+	params := &telego.SendMessageDraftParams{
+		ChatID:  cid,
+		DraftID: draftID,
+		Text:    text,
+	}
+	if threadID != "" {
+		if tid, err2 := strconv.Atoi(threadID); err2 == nil {
+			params.MessageThreadID = tid
+		}
+	}
+	return c.bot.SendMessageDraft(ctx, params)
+}
+
 // SendMedia implements the channels.MediaSender interface.
 func (c *TelegramChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessage) error {
 	if !c.IsRunning() {

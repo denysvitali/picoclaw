@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -61,8 +62,9 @@ type processOptions struct {
 	EnableSummary    bool     // Whether to trigger summarization
 	SendResponse     bool     // Whether to send response via bus
 	NoHistory        bool     // If true, don't load session history (for heartbeat)
-	ReplyToMessageID string   // Platform message ID to reply to (threaded response)
-	ThreadID         string   // Forum topic / thread ID for Telegram forum routing
+	ReplyToMessageID string       // Platform message ID to reply to (threaded response)
+	ThreadID         string       // Forum topic / thread ID for Telegram forum routing
+	ChunkCallback    func(string) // Called with full accumulated text on each LLM chunk (nil = no streaming)
 }
 
 const (
@@ -619,6 +621,29 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 			"route_channel": route.Channel,
 		})
 
+	// Build streaming callback when the provider and channel both support it.
+	var chunkCB func(string)
+	if msg.ThreadID != "" && al.channelManager != nil {
+		if ch, ok := al.channelManager.GetChannel(msg.Channel); ok {
+			if streamer, ok := ch.(channels.DraftStreamer); ok {
+				if _, ok := agent.Provider.(providers.StreamingProvider); ok {
+					draftID := rand.Int() + 1 // non-zero
+					chatID := msg.ChatID
+					threadID := msg.ThreadID
+					var lastDraft time.Time
+					const minDraftInterval = 400 * time.Millisecond
+					chunkCB = func(text string) {
+						if time.Since(lastDraft) < minDraftInterval {
+							return
+						}
+						lastDraft = time.Now()
+						_ = streamer.StreamDraft(ctx, chatID, threadID, draftID, text)
+					}
+				}
+			}
+		}
+	}
+
 	return al.runAgentLoop(ctx, agent, processOptions{
 		SessionKey:       sessionKey,
 		Channel:          msg.Channel,
@@ -630,6 +655,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		SendResponse:     false,
 		ThreadID:         msg.ThreadID,
 		ReplyToMessageID: msg.MessageID,
+		ChunkCallback:    chunkCB,
 	})
 }
 
@@ -970,6 +996,18 @@ func (al *AgentLoop) runLLMIteration(
 		// Retry loop for context/token errors
 		maxRetries := 2
 		for retry := 0; retry <= maxRetries; retry++ {
+			// Use streaming on the first attempt of the first iteration when available.
+			// Subsequent iterations (tool follow-ups) and retries always use Chat.
+			if retry == 0 && iteration == 1 && opts.ChunkCallback != nil {
+				if sp, ok := agent.Provider.(providers.StreamingProvider); ok {
+					response, err = sp.ChatStream(ctx, messages, providerToolDefs, activeModel, llmOpts, opts.ChunkCallback)
+					opts.ChunkCallback = nil // only stream once; fall back to Chat for retries/tool rounds
+					if err == nil {
+						break
+					}
+					// On stream error, fall through to callLLM retry
+				}
+			}
 			response, err = callLLM()
 			if err == nil {
 				break

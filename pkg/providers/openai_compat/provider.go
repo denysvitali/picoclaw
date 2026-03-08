@@ -220,6 +220,225 @@ func (p *Provider) Chat(
 	return out, nil
 }
 
+// ChatStream implements providers.StreamingProvider.
+// It sends the request with stream:true, reads SSE chunks line-by-line,
+// calls onChunk with the FULL accumulated text after each text delta,
+// and returns a complete *LLMResponse when the stream ends.
+func (p *Provider) ChatStream(
+	ctx context.Context,
+	messages []Message,
+	tools []ToolDefinition,
+	model string,
+	options map[string]any,
+	onChunk func(text string),
+) (*LLMResponse, error) {
+	if p.apiBase == "" {
+		return nil, fmt.Errorf("API base not configured")
+	}
+
+	model = normalizeModel(model, p.apiBase)
+
+	requestBody := map[string]any{
+		"model":    model,
+		"messages": serializeMessages(messages),
+		"stream":   true,
+	}
+
+	if len(tools) > 0 {
+		requestBody["tools"] = tools
+		requestBody["tool_choice"] = "auto"
+	}
+
+	if maxTokens, ok := asInt(options["max_tokens"]); ok {
+		fieldName := p.maxTokensField
+		if fieldName == "" {
+			lowerModel := strings.ToLower(model)
+			if strings.Contains(lowerModel, "glm") || strings.Contains(lowerModel, "o1") ||
+				strings.Contains(lowerModel, "gpt-5") {
+				fieldName = "max_completion_tokens"
+			} else {
+				fieldName = "max_tokens"
+			}
+		}
+		requestBody[fieldName] = maxTokens
+	}
+	if temperature, ok := asFloat(options["temperature"]); ok {
+		lowerModel := strings.ToLower(model)
+		if strings.Contains(lowerModel, "kimi") && strings.Contains(lowerModel, "k2") {
+			requestBody["temperature"] = 1.0
+		} else {
+			requestBody["temperature"] = temperature
+		}
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal stream request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", p.apiBase+"/chat/completions", bytes.NewReader(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stream request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send stream request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("stream API request failed:\n  Status: %d\n  Body:   %s", resp.StatusCode, string(body))
+	}
+
+	// Parse SSE line-by-line.
+	type streamToolCall struct {
+		id        string
+		name      string
+		arguments strings.Builder
+	}
+	var (
+		textAccum    strings.Builder
+		thinkAccum   strings.Builder
+		inThink      bool
+		toolCallsMap = map[int]*streamToolCall{}
+		finishReason string
+		usage        *UsageInfo
+	)
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content   string `json:"content"`
+					ToolCalls []struct {
+						Index    int    `json:"index"`
+						ID       string `json:"id"`
+						Type     string `json:"type"`
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+				FinishReason string `json:"finish_reason"`
+			} `json:"choices"`
+			Usage *UsageInfo `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		choice := chunk.Choices[0]
+		if choice.FinishReason != "" {
+			finishReason = choice.FinishReason
+		}
+
+		// Accumulate tool calls by index
+		for _, tc := range choice.Delta.ToolCalls {
+			if _, ok := toolCallsMap[tc.Index]; !ok {
+				toolCallsMap[tc.Index] = &streamToolCall{}
+			}
+			stc := toolCallsMap[tc.Index]
+			if tc.ID != "" {
+				stc.id = tc.ID
+			}
+			if tc.Function.Name != "" {
+				stc.name = tc.Function.Name
+			}
+			stc.arguments.WriteString(tc.Function.Arguments)
+		}
+
+		// Process text delta — handle <think> tag suppression
+		delta := choice.Delta.Content
+		if delta == "" {
+			continue
+		}
+
+		for i := 0; i < len(delta); {
+			if inThink {
+				rest := delta[i:]
+				idx := strings.Index(rest, "</think>")
+				if idx < 0 {
+					thinkAccum.WriteString(rest)
+					i = len(delta)
+				} else {
+					thinkAccum.WriteString(rest[:idx])
+					inThink = false
+					i += idx + len("</think>")
+				}
+			} else {
+				rest := delta[i:]
+				idx := strings.Index(rest, "<think>")
+				if idx < 0 {
+					textAccum.WriteString(rest)
+					i = len(delta)
+				} else {
+					textAccum.WriteString(rest[:idx])
+					inThink = true
+					i += idx + len("<think>")
+				}
+				if text := textAccum.String(); text != "" {
+					onChunk(text)
+				}
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("stream read error: %w", err)
+	}
+
+	// Build tool calls from accumulated map
+	toolCalls := make([]ToolCall, 0, len(toolCallsMap))
+	for i := 0; i < len(toolCallsMap); i++ {
+		stc, ok := toolCallsMap[i]
+		if !ok {
+			continue
+		}
+		arguments := make(map[string]any)
+		if raw := stc.arguments.String(); raw != "" {
+			if jsonErr := json.Unmarshal([]byte(raw), &arguments); jsonErr != nil {
+				arguments["raw"] = raw
+			}
+		}
+		toolCalls = append(toolCalls, ToolCall{
+			ID:        stc.id,
+			Name:      stc.name,
+			Arguments: arguments,
+		})
+	}
+
+	return &LLMResponse{
+		Content:          textAccum.String(),
+		ReasoningContent: strings.TrimSpace(thinkAccum.String()),
+		ToolCalls:        toolCalls,
+		FinishReason:     finishReason,
+		Usage:            usage,
+	}, nil
+}
+
 func wrapHTMLResponseError(statusCode int, body []byte, contentType, apiBase string) error {
 	respPreview := responsePreview(body, 128)
 	return fmt.Errorf(

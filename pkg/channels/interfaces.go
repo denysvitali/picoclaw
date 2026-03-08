@@ -36,6 +36,14 @@ type PlaceholderCapable interface {
 	SendPlaceholder(ctx context.Context, chatID string, threadID string, replyToMsgID string) (messageID string, err error)
 }
 
+// DraftStreamer — channels that can show a live "draft bubble" while the LLM
+// generates (e.g. Telegram sendMessageDraft, Bot API 9.3+).
+// draftID must be a stable non-zero integer for the duration of this response;
+// each call replaces the previous draft bubble with the new text.
+type DraftStreamer interface {
+	StreamDraft(ctx context.Context, chatID, threadID string, draftID int, text string) error
+}
+
 // PlaceholderRecorder is injected into channels by Manager.
 // Channels call these methods on inbound to register typing/placeholder state.
 // Manager uses the registered state on outbound to stop typing and edit placeholders.

@@ -37,6 +37,21 @@ type StatefulProvider interface {
 	Close()
 }
 
+// StreamingProvider is an optional interface for providers that support
+// token-by-token streaming. onChunk is called with the FULL accumulated text
+// after each delta (not just the delta itself), so callers always have the
+// current complete state. Returns a complete *LLMResponse when the stream ends.
+type StreamingProvider interface {
+	ChatStream(
+		ctx context.Context,
+		messages []Message,
+		tools []ToolDefinition,
+		model string,
+		options map[string]any,
+		onChunk func(text string),
+	) (*LLMResponse, error)
+}
+
 // ThinkingCapable is an optional interface for providers that support
 // extended thinking (e.g. Anthropic). Used by the agent loop to warn
 // when thinking_level is configured but the active provider cannot use it.
