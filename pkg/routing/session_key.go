@@ -27,6 +27,7 @@ type SessionKeyParams struct {
 	Channel       string
 	AccountID     string
 	Peer          *RoutePeer
+	ThreadID      string
 	DMScope       DMScope
 	IdentityLinks map[string][]string
 }
@@ -95,6 +96,10 @@ func BuildAgentPeerSessionKey(params SessionKeyParams) string {
 	peerID := strings.ToLower(strings.TrimSpace(peer.ID))
 	if peerID == "" {
 		peerID = "unknown"
+	}
+	threadID := strings.ToLower(strings.TrimSpace(params.ThreadID))
+	if threadID != "" {
+		return fmt.Sprintf("agent:%s:%s:%s:%s:thread:%s", agentID, channel, peerKind, peerID, threadID)
 	}
 	return fmt.Sprintf("agent:%s:%s:%s:%s", agentID, channel, peerKind, peerID)
 }

@@ -295,3 +295,32 @@ func TestResolveRoute_NoDefaultUsesFirst(t *testing.T) {
 		t.Errorf("AgentID = %q, want 'alpha' (first in list)", route.AgentID)
 	}
 }
+
+func TestResolveRoute_ThreadIDSplitsSessionForGroupPeer(t *testing.T) {
+	agents := []config.AgentConfig{
+		{ID: "main", Default: true},
+	}
+	cfg := testConfig(agents, nil)
+	r := NewRouteResolver(cfg)
+
+	routeA := r.ResolveRoute(RouteInput{
+		Channel:  "telegram",
+		Peer:     &RoutePeer{Kind: "group", ID: "chat1"},
+		ThreadID: "1001",
+	})
+	routeB := r.ResolveRoute(RouteInput{
+		Channel:  "telegram",
+		Peer:     &RoutePeer{Kind: "group", ID: "chat1"},
+		ThreadID: "1002",
+	})
+
+	if routeA.SessionKey == routeB.SessionKey {
+		t.Fatalf("expected different session keys for different threads, got %q", routeA.SessionKey)
+	}
+	if routeA.SessionKey != "agent:main:telegram:group:chat1:thread:1001" {
+		t.Errorf("routeA.SessionKey = %q, want %q", routeA.SessionKey, "agent:main:telegram:group:chat1:thread:1001")
+	}
+	if routeB.SessionKey != "agent:main:telegram:group:chat1:thread:1002" {
+		t.Errorf("routeB.SessionKey = %q, want %q", routeB.SessionKey, "agent:main:telegram:group:chat1:thread:1002")
+	}
+}

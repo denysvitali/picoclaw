@@ -11,6 +11,7 @@ type RouteInput struct {
 	Channel    string
 	AccountID  string
 	Peer       *RoutePeer
+	ThreadID   string
 	ParentPeer *RoutePeer
 	GuildID    string
 	TeamID     string
@@ -59,6 +60,7 @@ func (r *RouteResolver) ResolveRoute(input RouteInput) ResolvedRoute {
 			Channel:       channel,
 			AccountID:     accountID,
 			Peer:          peer,
+			ThreadID:      input.ThreadID,
 			DMScope:       dmScope,
 			IdentityLinks: identityLinks,
 		}))
