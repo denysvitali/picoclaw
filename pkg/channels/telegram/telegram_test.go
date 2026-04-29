@@ -735,6 +735,71 @@ func TestSend_UsesContextTopicIDWhenChatIDDoesNotIncludeThread(t *testing.T) {
 	assert.Equal(t, "Hello from topic context", params.Text)
 }
 
+func TestSend_UsesDirectMessagesTopicIDFromContext(t *testing.T) {
+	caller := &stubCaller{
+		callFn: func(ctx context.Context, url string, data *ta.RequestData) (*ta.Response, error) {
+			return successResponse(t), nil
+		},
+	}
+	ch := newTestChannel(t, caller)
+
+	_, err := ch.Send(context.Background(), bus.OutboundMessage{
+		ChatID:  "-1001234567890",
+		Content: "Hello from direct messages topic",
+		Context: bus.InboundContext{
+			Channel: "telegram",
+			ChatID:  "-1001234567890",
+			TopicID: "900719925474099",
+			Raw: map[string]string{
+				"direct_messages_topic_id": "900719925474099",
+			},
+		},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, caller.calls, 1)
+
+	var params struct {
+		ChatID                int64  `json:"chat_id"`
+		MessageThreadID       int    `json:"message_thread_id"`
+		DirectMessagesTopicID int64  `json:"direct_messages_topic_id"`
+		Text                  string `json:"text"`
+	}
+	require.NoError(t, json.Unmarshal(caller.calls[0].Data.BodyRaw, &params))
+	assert.Equal(t, int64(-1001234567890), params.ChatID)
+	assert.Zero(t, params.MessageThreadID)
+	assert.Equal(t, int64(900719925474099), params.DirectMessagesTopicID)
+	assert.Equal(t, "Hello from direct messages topic", params.Text)
+}
+
+func TestSendPlaceholder_UsesDirectMessagesTopicIDFromCompositeChatID(t *testing.T) {
+	caller := &stubCaller{
+		callFn: func(ctx context.Context, url string, data *ta.RequestData) (*ta.Response, error) {
+			return successResponse(t), nil
+		},
+	}
+	ch := newTestChannel(t, caller)
+	ch.bc.Placeholder.Enabled = true
+
+	msgID, err := ch.SendPlaceholder(context.Background(), "-1001234567890/dm:900719925474099")
+
+	require.NoError(t, err)
+	assert.Equal(t, "1", msgID)
+	require.Len(t, caller.calls, 1)
+
+	var params struct {
+		ChatID                int64  `json:"chat_id"`
+		MessageThreadID       int    `json:"message_thread_id"`
+		DirectMessagesTopicID int64  `json:"direct_messages_topic_id"`
+		Text                  string `json:"text"`
+	}
+	require.NoError(t, json.Unmarshal(caller.calls[0].Data.BodyRaw, &params))
+	assert.Equal(t, int64(-1001234567890), params.ChatID)
+	assert.Zero(t, params.MessageThreadID)
+	assert.Equal(t, int64(900719925474099), params.DirectMessagesTopicID)
+	assert.Equal(t, "Thinking...", params.Text)
+}
+
 func TestBeginStream_UpdateUsesForumThreadID(t *testing.T) {
 	caller := &stubCaller{
 		callFn: func(ctx context.Context, url string, data *ta.RequestData) (*ta.Response, error) {
@@ -820,6 +885,78 @@ func TestHandleMessage_ForumTopic_SetsMetadata(t *testing.T) {
 	assert.Equal(t, "-1001234567890", inbound.ChatID)
 	assert.Equal(t, "group", inbound.Context.ChatType)
 	assert.Equal(t, "42", inbound.Context.TopicID)
+}
+
+func TestHandleMessage_PrivateTopic_SetsMetadata(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	ch := &TelegramChannel{
+		BaseChannel: channels.NewBaseChannel("telegram", nil, messageBus, nil),
+		chatIDs:     make(map[string]int64),
+		ctx:         context.Background(),
+	}
+
+	msg := &telego.Message{
+		Text:            "hello from private topic",
+		MessageID:       12,
+		MessageThreadID: 77,
+		IsTopicMessage:  true,
+		Chat: telego.Chat{
+			ID:   12345,
+			Type: "private",
+		},
+		From: &telego.User{
+			ID:        7,
+			FirstName: "Alice",
+		},
+	}
+
+	err := ch.handleMessage(context.Background(), msg)
+	require.NoError(t, err)
+
+	inbound, ok := <-messageBus.InboundChan()
+	require.True(t, ok, "expected inbound message")
+
+	assert.Equal(t, "12345", inbound.ChatID)
+	assert.Equal(t, "direct", inbound.Context.ChatType)
+	assert.Equal(t, "77", inbound.Context.TopicID)
+	assert.Equal(t, "true", inbound.Context.Raw["is_topic_message"])
+	assert.Equal(t, "77", inbound.Context.Raw["message_thread_id"])
+}
+
+func TestHandleMessage_DirectMessagesTopic_SetsMetadata(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	ch := &TelegramChannel{
+		BaseChannel: channels.NewBaseChannel("telegram", nil, messageBus, nil),
+		chatIDs:     make(map[string]int64),
+		ctx:         context.Background(),
+	}
+
+	msg := &telego.Message{
+		Text:      "hello from channel direct messages topic",
+		MessageID: 13,
+		DirectMessagesTopic: &telego.DirectMessagesTopic{
+			TopicID: 900719925474099,
+		},
+		Chat: telego.Chat{
+			ID:   -1001234567890,
+			Type: "supergroup",
+		},
+		From: &telego.User{
+			ID:        7,
+			FirstName: "Alice",
+		},
+	}
+
+	err := ch.handleMessage(context.Background(), msg)
+	require.NoError(t, err)
+
+	inbound, ok := <-messageBus.InboundChan()
+	require.True(t, ok, "expected inbound message")
+
+	assert.Equal(t, "-1001234567890", inbound.ChatID)
+	assert.Equal(t, "group", inbound.Context.ChatType)
+	assert.Equal(t, "900719925474099", inbound.Context.TopicID)
+	assert.Equal(t, "900719925474099", inbound.Context.Raw["direct_messages_topic_id"])
 }
 
 func TestHandleMessage_NoForum_NoThreadMetadata(t *testing.T) {

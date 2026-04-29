@@ -43,6 +43,8 @@ var (
 	reInlineCode = regexp.MustCompile("`([^`]+)`")
 )
 
+const telegramRawDirectMessagesTopicID = "direct_messages_topic_id"
+
 type TelegramChannel struct {
 	*channels.BaseChannel
 	bot      *telego.Bot
@@ -189,7 +191,7 @@ func (c *TelegramChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]
 
 	useMarkdownV2 := c.tgCfg.UseMarkdownV2
 
-	chatID, threadID, err := resolveTelegramOutboundTarget(msg.ChatID, &msg.Context)
+	chatID, threadID, directTopicID, err := resolveTelegramOutboundTarget(msg.ChatID, &msg.Context)
 	if err != nil {
 		return nil, fmt.Errorf("invalid chat ID %s: %w", msg.ChatID, channels.ErrSendFailed)
 	}
@@ -255,6 +257,7 @@ func (c *TelegramChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]
 				msgID, err := c.sendChunk(ctx, sendChunkParams{
 					chatID:        chatID,
 					threadID:      threadID,
+					directTopicID: directTopicID,
 					content:       content,
 					replyToID:     replyToID,
 					mdFallback:    chunk,
@@ -295,6 +298,7 @@ func (c *TelegramChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]
 		msgID, err := c.sendChunk(ctx, sendChunkParams{
 			chatID:        chatID,
 			threadID:      threadID,
+			directTopicID: directTopicID,
 			content:       content,
 			replyToID:     replyToID,
 			mdFallback:    chunk,
@@ -320,6 +324,7 @@ func (c *TelegramChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]
 type sendChunkParams struct {
 	chatID        int64
 	threadID      int
+	directTopicID int64
 	content       string
 	replyToID     string
 	mdFallback    string
@@ -334,6 +339,7 @@ func (c *TelegramChannel) sendChunk(
 ) (string, error) {
 	tgMsg := tu.Message(tu.ID(params.chatID), params.content)
 	tgMsg.MessageThreadID = params.threadID
+	tgMsg.DirectMessagesTopicID = params.directTopicID
 	if params.useMarkdownV2 {
 		tgMsg.WithParseMode(telego.ModeMarkdownV2)
 	} else {
@@ -575,13 +581,14 @@ func (c *TelegramChannel) SendPlaceholder(ctx context.Context, chatID string) (s
 
 	text := phCfg.GetRandomText()
 
-	cid, threadID, err := parseTelegramChatID(chatID)
+	cid, threadID, directTopicID, err := parseTelegramChatAddress(chatID)
 	if err != nil {
 		return "", err
 	}
 
 	phMsg := tu.Message(tu.ID(cid), text)
 	phMsg.MessageThreadID = threadID
+	phMsg.DirectMessagesTopicID = directTopicID
 	pMsg, err := c.bot.SendMessage(ctx, phMsg)
 	if err != nil {
 		return "", err
@@ -598,7 +605,7 @@ func (c *TelegramChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMe
 	trackedChatID := telegramToolFeedbackChatKey(msg.ChatID, &msg.Context)
 	trackedMsgID, hasTrackedMsg := c.currentToolFeedbackMessage(trackedChatID)
 
-	chatID, threadID, err := resolveTelegramOutboundTarget(msg.ChatID, &msg.Context)
+	chatID, threadID, directTopicID, err := resolveTelegramOutboundTarget(msg.ChatID, &msg.Context)
 	if err != nil {
 		return nil, fmt.Errorf("invalid chat ID %s: %w", msg.ChatID, channels.ErrSendFailed)
 	}
@@ -632,10 +639,11 @@ func (c *TelegramChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMe
 		switch part.Type {
 		case "image":
 			params := &telego.SendPhotoParams{
-				ChatID:          tu.ID(chatID),
-				MessageThreadID: threadID,
-				Photo:           telego.InputFile{File: file},
-				Caption:         part.Caption,
+				ChatID:                tu.ID(chatID),
+				MessageThreadID:       threadID,
+				DirectMessagesTopicID: directTopicID,
+				Photo:                 telego.InputFile{File: file},
+				Caption:               part.Caption,
 			}
 			tgResult, err = c.bot.SendPhoto(ctx, params)
 			if err != nil && strings.Contains(err.Error(), "PHOTO_INVALID_DIMENSIONS") {
@@ -645,10 +653,11 @@ func (c *TelegramChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMe
 				}
 
 				docParams := &telego.SendDocumentParams{
-					ChatID:          tu.ID(chatID),
-					MessageThreadID: threadID,
-					Document:        telego.InputFile{File: file},
-					Caption:         part.Caption,
+					ChatID:                tu.ID(chatID),
+					MessageThreadID:       threadID,
+					DirectMessagesTopicID: directTopicID,
+					Document:              telego.InputFile{File: file},
+					Caption:               part.Caption,
 				}
 				tgResult, err = c.bot.SendDocument(ctx, docParams)
 			}
@@ -658,35 +667,39 @@ func (c *TelegramChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMe
 			fn := strings.ToLower(part.Filename)
 			if strings.Contains(fn, "voice") && (strings.HasSuffix(fn, ".ogg") || strings.HasSuffix(fn, ".oga")) {
 				vparams := &telego.SendVoiceParams{
-					ChatID:          tu.ID(chatID),
-					MessageThreadID: threadID,
-					Voice:           telego.InputFile{File: file},
-					Caption:         part.Caption,
+					ChatID:                tu.ID(chatID),
+					MessageThreadID:       threadID,
+					DirectMessagesTopicID: directTopicID,
+					Voice:                 telego.InputFile{File: file},
+					Caption:               part.Caption,
 				}
 				tgResult, err = c.bot.SendVoice(ctx, vparams)
 			} else {
 				params := &telego.SendAudioParams{
-					ChatID:          tu.ID(chatID),
-					MessageThreadID: threadID,
-					Audio:           telego.InputFile{File: file},
-					Caption:         part.Caption,
+					ChatID:                tu.ID(chatID),
+					MessageThreadID:       threadID,
+					DirectMessagesTopicID: directTopicID,
+					Audio:                 telego.InputFile{File: file},
+					Caption:               part.Caption,
 				}
 				tgResult, err = c.bot.SendAudio(ctx, params)
 			}
 		case "video":
 			params := &telego.SendVideoParams{
-				ChatID:          tu.ID(chatID),
-				MessageThreadID: threadID,
-				Video:           telego.InputFile{File: file},
-				Caption:         part.Caption,
+				ChatID:                tu.ID(chatID),
+				MessageThreadID:       threadID,
+				DirectMessagesTopicID: directTopicID,
+				Video:                 telego.InputFile{File: file},
+				Caption:               part.Caption,
 			}
 			tgResult, err = c.bot.SendVideo(ctx, params)
 		default: // "file" or unknown types
 			params := &telego.SendDocumentParams{
-				ChatID:          tu.ID(chatID),
-				MessageThreadID: threadID,
-				Document:        telego.InputFile{File: file},
-				Caption:         part.Caption,
+				ChatID:                tu.ID(chatID),
+				MessageThreadID:       threadID,
+				DirectMessagesTopicID: directTopicID,
+				Document:              telego.InputFile{File: file},
+				Caption:               part.Caption,
 			}
 			tgResult, err = c.bot.SendDocument(ctx, params)
 		}
@@ -860,14 +873,14 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 		content = c.prependTelegramQuotedReply(content, message.ReplyToMessage)
 	}
 
-	// For forum topics, embed the thread ID as "chatID/threadID" so replies
-	// route to the correct topic and each topic gets its own session.
-	// Only forum groups (IsForum) are handled; regular group reply threads
-	// must share one session per group.
 	compositeChatID := fmt.Sprintf("%d", chatID)
 	threadID := message.MessageThreadID
-	if message.Chat.IsForum && threadID != 0 {
+	isTopicMessage := telegramMessageHasTopic(message)
+	if isTopicMessage && threadID != 0 {
 		compositeChatID = fmt.Sprintf("%d/%d", chatID, threadID)
+	}
+	if message.DirectMessagesTopic != nil && message.DirectMessagesTopic.TopicID != 0 {
+		compositeChatID = fmt.Sprintf("%d/dm:%d", chatID, message.DirectMessagesTopic.TopicID)
 	}
 
 	logger.DebugCF("telegram", "Received message", map[string]any{
@@ -889,6 +902,15 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 		"first_name": user.FirstName,
 		"is_group":   fmt.Sprintf("%t", message.Chat.Type != "private"),
 	}
+	if threadID != 0 {
+		metadata["message_thread_id"] = fmt.Sprintf("%d", threadID)
+	}
+	if message.IsTopicMessage {
+		metadata["is_topic_message"] = "true"
+	}
+	if message.DirectMessagesTopic != nil && message.DirectMessagesTopic.TopicID != 0 {
+		metadata[telegramRawDirectMessagesTopicID] = fmt.Sprintf("%d", message.DirectMessagesTopic.TopicID)
+	}
 
 	inboundCtx := bus.InboundContext{
 		Channel:   c.Name(),
@@ -899,8 +921,11 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 		Mentioned: isMentioned,
 		Raw:       metadata,
 	}
-	if message.Chat.IsForum && threadID != 0 {
+	if isTopicMessage && threadID != 0 {
 		inboundCtx.TopicID = fmt.Sprintf("%d", threadID)
+	}
+	if message.DirectMessagesTopic != nil && message.DirectMessagesTopic.TopicID != 0 {
+		inboundCtx.TopicID = fmt.Sprintf("%d", message.DirectMessagesTopic.TopicID)
 	}
 	if message.ReplyToMessage != nil {
 		inboundCtx.ReplyToMessageID = fmt.Sprintf("%d", message.ReplyToMessage.MessageID)
@@ -1123,8 +1148,14 @@ func (c *TelegramChannel) PrepareToolFeedbackMessageContent(content string) stri
 }
 
 func telegramToolFeedbackChatKey(chatID string, outboundCtx *bus.InboundContext) string {
-	resolvedChatID, threadID, err := resolveTelegramOutboundTarget(chatID, outboundCtx)
-	if err != nil || threadID == 0 {
+	resolvedChatID, threadID, directTopicID, err := resolveTelegramOutboundTarget(chatID, outboundCtx)
+	if err != nil {
+		return strings.TrimSpace(chatID)
+	}
+	if directTopicID != 0 {
+		return fmt.Sprintf("%d/dm:%d", resolvedChatID, directTopicID)
+	}
+	if threadID == 0 {
 		return strings.TrimSpace(chatID)
 	}
 	return fmt.Sprintf("%d/%d", resolvedChatID, threadID)
@@ -1137,6 +1168,9 @@ func (c *TelegramChannel) ToolFeedbackMessageChatID(chatID string, outboundCtx *
 // parseTelegramChatID splits "chatID/threadID" into its components.
 // Returns threadID=0 when no "/" is present (non-forum messages).
 func parseTelegramChatID(chatID string) (int64, int, error) {
+	if base, _, ok := parseTelegramDirectTopicChatID(chatID); ok {
+		chatID = base
+	}
 	idx := strings.Index(chatID, "/")
 	if idx == -1 {
 		cid, err := strconv.ParseInt(chatID, 10, 64)
@@ -1153,26 +1187,80 @@ func parseTelegramChatID(chatID string) (int64, int, error) {
 	return cid, tid, nil
 }
 
-func resolveTelegramOutboundTarget(chatID string, outboundCtx *bus.InboundContext) (int64, int, error) {
+func parseTelegramChatAddress(chatID string) (int64, int, int64, error) {
+	if base, directTopicID, ok := parseTelegramDirectTopicChatID(chatID); ok {
+		cid, _, err := parseTelegramChatID(base)
+		return cid, 0, directTopicID, err
+	}
+	cid, threadID, err := parseTelegramChatID(chatID)
+	return cid, threadID, 0, err
+}
+
+func resolveTelegramOutboundTarget(chatID string, outboundCtx *bus.InboundContext) (int64, int, int64, error) {
 	targetChatID := strings.TrimSpace(chatID)
 	if targetChatID == "" && outboundCtx != nil {
 		targetChatID = strings.TrimSpace(outboundCtx.ChatID)
 	}
-	resolvedChatID, resolvedThreadID, err := parseTelegramChatID(targetChatID)
+	resolvedChatID, resolvedThreadID, resolvedDirectTopicID, err := parseTelegramChatAddress(targetChatID)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
+	}
+	if resolvedDirectTopicID != 0 {
+		return resolvedChatID, 0, resolvedDirectTopicID, nil
+	}
+	if outboundCtx != nil {
+		if directTopicID, ok := telegramDirectMessagesTopicID(outboundCtx); ok {
+			return resolvedChatID, 0, directTopicID, nil
+		}
 	}
 	if resolvedThreadID != 0 || outboundCtx == nil {
-		return resolvedChatID, resolvedThreadID, nil
+		return resolvedChatID, resolvedThreadID, 0, nil
 	}
 	topicID := strings.TrimSpace(outboundCtx.TopicID)
 	if topicID == "" {
-		return resolvedChatID, resolvedThreadID, nil
+		return resolvedChatID, resolvedThreadID, 0, nil
 	}
 	if threadID, convErr := strconv.Atoi(topicID); convErr == nil {
-		return resolvedChatID, threadID, nil
+		return resolvedChatID, threadID, 0, nil
 	}
-	return resolvedChatID, resolvedThreadID, nil
+	return resolvedChatID, resolvedThreadID, 0, nil
+}
+
+func telegramDirectMessagesTopicID(ctx *bus.InboundContext) (int64, bool) {
+	if ctx == nil || len(ctx.Raw) == 0 {
+		return 0, false
+	}
+	raw := strings.TrimSpace(ctx.Raw[telegramRawDirectMessagesTopicID])
+	if raw == "" {
+		raw = strings.TrimSpace(ctx.Raw["telegram_direct_messages_topic_id"])
+	}
+	if raw == "" {
+		return 0, false
+	}
+	topicID, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || topicID == 0 {
+		return 0, false
+	}
+	return topicID, true
+}
+
+func parseTelegramDirectTopicChatID(chatID string) (string, int64, bool) {
+	idx := strings.Index(chatID, "/dm:")
+	if idx == -1 {
+		return "", 0, false
+	}
+	topicID, err := strconv.ParseInt(chatID[idx+4:], 10, 64)
+	if err != nil || topicID == 0 {
+		return chatID, 0, false
+	}
+	return chatID[:idx], topicID, true
+}
+
+func telegramMessageHasTopic(message *telego.Message) bool {
+	if message == nil || message.MessageThreadID == 0 {
+		return false
+	}
+	return message.IsTopicMessage || message.Chat.IsForum
 }
 
 func logParseFailed(err error, useMarkdownV2 bool) {
