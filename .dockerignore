@@ -2,6 +2,7 @@
 # during `go generate`, which runs inside `make build` in the Dockerfile.
 .git
 .gitignore
+.cache/
 build/
 .picoclaw/
 config/

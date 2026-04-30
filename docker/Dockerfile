@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # ============================================================
 # Stage 1: Build the picoclaw binary
 # ============================================================
@@ -9,11 +11,14 @@ WORKDIR /src
 
 # Cache dependencies
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 # Copy source and build
 COPY . .
-RUN make build
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    GOCACHE=/root/.cache/go-build GOMODCACHE=/go/pkg/mod make build
 
 # ============================================================
 # Stage 2: Minimal runtime image

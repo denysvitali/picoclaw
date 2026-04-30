@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # ============================================================
 # Stage 1: Build frontend assets (Node.js + pnpm)
 # ============================================================
@@ -9,7 +11,8 @@ WORKDIR /src/web/frontend
 
 # Cache frontend dependencies
 COPY web/frontend/package.json web/frontend/pnpm-lock.yaml ./
-RUN CI=true pnpm install --frozen-lockfile
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    CI=true pnpm install --frozen-lockfile --store-dir /root/.local/share/pnpm/store
 
 # Build frontend
 COPY web/frontend/ ./
@@ -26,7 +29,8 @@ WORKDIR /src
 
 # Cache Go dependencies
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 # Copy source
 COPY . .
@@ -35,11 +39,16 @@ COPY . .
 COPY --from=frontend /src/web/backend/dist web/backend/dist
 
 # Build picoclaw binary (includes go generate)
-RUN make build
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    GOCACHE=/root/.cache/go-build GOMODCACHE=/go/pkg/mod make build
 
 # Build picoclaw-launcher binary (frontend already built in stage 1)
 # Mirror ldflags from web/Makefile to inject version metadata
-RUN CONFIG_PKG=github.com/sipeed/picoclaw/pkg/config && \
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    export GOCACHE=/root/.cache/go-build GOMODCACHE=/go/pkg/mod && \
+    CONFIG_PKG=github.com/sipeed/picoclaw/pkg/config && \
     VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo dev) && \
     GIT_COMMIT=$(git rev-parse --short=8 HEAD 2>/dev/null || echo dev) && \
     BUILD_TIME=$(date +%FT%T%z) && \
