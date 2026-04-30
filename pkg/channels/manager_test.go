@@ -925,7 +925,7 @@ func TestPreSend_ToolFeedbackPlaceholderEditUsesResolvedTrackedChatID(t *testing
 	ch := &mockResolvedToolFeedbackEditor{
 		mockMessageEditor: mockMessageEditor{
 			editFn: func(_ context.Context, chatID, messageID, content string) error {
-				if chatID != "-100123" || messageID != "456" || content != "hello" {
+				if chatID != "-100123/42" || messageID != "456" || content != "hello" {
 					t.Fatalf("unexpected edit args: %s %s %s", chatID, messageID, content)
 				}
 				return nil
@@ -942,7 +942,7 @@ func TestPreSend_ToolFeedbackPlaceholderEditUsesResolvedTrackedChatID(t *testing
 		},
 	}
 
-	m.RecordPlaceholder("test", "-100123", "456")
+	m.RecordPlaceholder("test", "-100123/42", "456")
 
 	msg := testOutboundMessage(bus.OutboundMessage{
 		Channel: "test",
@@ -1562,7 +1562,7 @@ func TestPreSend_PlaceholderEditSuccessDismissesResolvedTrackedToolFeedback(t *t
 	ch := &mockResolvedToolFeedbackEditor{
 		mockMessageEditor: mockMessageEditor{
 			editFn: func(_ context.Context, chatID, messageID, content string) error {
-				if chatID != "-100123" || messageID != "456" || content != "done" {
+				if chatID != "-100123/42" || messageID != "456" || content != "done" {
 					t.Fatalf("unexpected edit args: %s %s %s", chatID, messageID, content)
 				}
 				return nil
@@ -1576,7 +1576,7 @@ func TestPreSend_PlaceholderEditSuccessDismissesResolvedTrackedToolFeedback(t *t
 		},
 	}
 
-	m.RecordPlaceholder("test", "-100123", "456")
+	m.RecordPlaceholder("test", "-100123/42", "456")
 
 	msg := testOutboundMessage(bus.OutboundMessage{
 		Channel: "test",
@@ -1595,6 +1595,45 @@ func TestPreSend_PlaceholderEditSuccessDismissesResolvedTrackedToolFeedback(t *t
 	}
 	if ch.dismissedChatID != "-100123/42" {
 		t.Fatalf("expected resolved tracked dismissal, got %q", ch.dismissedChatID)
+	}
+}
+
+func TestPreSend_StreamActiveUsesResolvedTopicChatID(t *testing.T) {
+	m := newTestManager()
+	ch := &mockResolvedToolFeedbackEditor{
+		mockMessageEditor: mockMessageEditor{
+			editFn: func(context.Context, string, string, string) error { return nil },
+		},
+		resolveChatIDFn: func(chatID string, outboundCtx *bus.InboundContext) string {
+			if outboundCtx == nil || outboundCtx.TopicID != "42" {
+				t.Fatalf("expected topic-aware outbound context, got %+v", outboundCtx)
+			}
+			return chatID + "/" + outboundCtx.TopicID
+		},
+	}
+	m.streamActive.Store("test:-100123/42", true)
+	m.RecordPlaceholder("test", "-100123/42", "placeholder-1")
+
+	msg := testOutboundMessage(bus.OutboundMessage{
+		Channel: "test",
+		ChatID:  "-100123",
+		Content: "done",
+		Context: bus.InboundContext{
+			Channel: "test",
+			ChatID:  "-100123",
+			TopicID: "42",
+		},
+	})
+
+	_, handled := m.preSend(context.Background(), "test", msg, ch)
+	if !handled {
+		t.Fatal("expected stream-active topic response to be handled")
+	}
+	if _, ok := m.streamActive.Load("test:-100123/42"); ok {
+		t.Fatal("expected topic stream marker to be consumed")
+	}
+	if _, ok := m.placeholders.Load("test:-100123/42"); ok {
+		t.Fatal("expected topic placeholder to be removed")
 	}
 }
 

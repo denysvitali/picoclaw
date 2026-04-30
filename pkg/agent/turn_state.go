@@ -130,6 +130,7 @@ type turnExecution struct {
 
 	// LLM call per-iteration state
 	response            *providers.LLMResponse
+	responseStreamer    bus.Streamer
 	normalizedToolCalls []providers.ToolCall
 	allResponsesHandled bool
 	callMessages        []providers.Message

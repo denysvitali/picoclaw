@@ -111,6 +111,10 @@ type toolFeedbackMessageTargetResolver interface {
 	ToolFeedbackMessageChatID(chatID string, outboundCtx *bus.InboundContext) string
 }
 
+type outboundMessageTargetResolver interface {
+	OutboundMessageChatID(chatID string, outboundCtx *bus.InboundContext) string
+}
+
 type toolFeedbackMessageContentPreparer interface {
 	PrepareToolFeedbackMessageContent(content string) string
 }
@@ -148,6 +152,20 @@ func outboundMediaChannel(msg bus.OutboundMediaMessage) string {
 
 func outboundMediaChatID(msg bus.OutboundMediaMessage) string {
 	return msg.ChatID
+}
+
+func resolvedOutboundMessageChatID(ch Channel, chatID string, outboundCtx *bus.InboundContext) string {
+	if resolver, ok := ch.(outboundMessageTargetResolver); ok {
+		if resolved := strings.TrimSpace(resolver.OutboundMessageChatID(chatID, outboundCtx)); resolved != "" {
+			return resolved
+		}
+	}
+	if resolver, ok := ch.(toolFeedbackMessageTargetResolver); ok {
+		if resolved := strings.TrimSpace(resolver.ToolFeedbackMessageChatID(chatID, outboundCtx)); resolved != "" {
+			return resolved
+		}
+	}
+	return strings.TrimSpace(chatID)
 }
 
 func trackedToolFeedbackMessageChatID(ch Channel, chatID string, outboundCtx *bus.InboundContext) string {
@@ -275,7 +293,8 @@ func (m *Manager) RecordReactionUndo(channel, chatID string, undo func()) {
 // preSend handles typing stop, reaction undo, and placeholder editing before sending a message.
 // Returns the delivered message IDs and true when delivery completed before a normal Send.
 func (m *Manager) preSend(ctx context.Context, name string, msg bus.OutboundMessage, ch Channel) ([]string, bool) {
-	chatID := outboundMessageChatID(msg)
+	rawChatID := outboundMessageChatID(msg)
+	chatID := resolvedOutboundMessageChatID(ch, rawChatID, &msg.Context)
 	key := name + ":" + chatID
 
 	// 1. Stop typing
@@ -319,16 +338,16 @@ func (m *Manager) preSend(ctx context.Context, name string, msg bus.OutboundMess
 		}
 		if !isToolFeedback {
 			if separateToolFeedbackMessages {
-				clearTrackedToolFeedbackMessage(ch, chatID, &msg.Context)
+				clearTrackedToolFeedbackMessage(ch, rawChatID, &msg.Context)
 			} else {
-				dismissTrackedToolFeedbackMessage(ctx, ch, chatID, &msg.Context)
+				dismissTrackedToolFeedbackMessage(ctx, ch, rawChatID, &msg.Context)
 			}
 		}
 		return nil, true
 	}
 
 	if separateToolFeedbackMessages {
-		clearTrackedToolFeedbackMessage(ch, chatID, &msg.Context)
+		clearTrackedToolFeedbackMessage(ch, rawChatID, &msg.Context)
 	}
 
 	// 5. Try editing placeholder
@@ -354,11 +373,11 @@ func (m *Manager) preSend(ctx context.Context, name string, msg bus.OutboundMess
 					content = InitialAnimatedToolFeedbackContent(trackedContent)
 				}
 				if err := editor.EditMessage(ctx, chatID, entry.id, content); err == nil {
-					trackedChatID := trackedToolFeedbackMessageChatID(ch, chatID, &msg.Context)
+					trackedChatID := trackedToolFeedbackMessageChatID(ch, rawChatID, &msg.Context)
 					if tracker, ok := ch.(toolFeedbackMessageTracker); ok && isToolFeedback {
 						tracker.RecordToolFeedbackMessage(trackedChatID, entry.id, trackedContent)
 					} else if !isToolFeedback {
-						dismissTrackedToolFeedbackMessage(ctx, ch, chatID, &msg.Context)
+						dismissTrackedToolFeedbackMessage(ctx, ch, rawChatID, &msg.Context)
 					}
 					return []string{entry.id}, true
 				}
@@ -375,7 +394,8 @@ func (m *Manager) preSend(ctx context.Context, name string, msg bus.OutboundMess
 // delivery never edits the placeholder because there is no text payload to
 // replace it with; it only attempts to delete the placeholder when possible.
 func (m *Manager) preSendMedia(ctx context.Context, name string, msg bus.OutboundMediaMessage, ch Channel) {
-	chatID := outboundMediaChatID(msg)
+	rawChatID := outboundMediaChatID(msg)
+	chatID := resolvedOutboundMessageChatID(ch, rawChatID, &msg.Context)
 	key := name + ":" + chatID
 
 	// 1. Stop typing
@@ -396,7 +416,7 @@ func (m *Manager) preSendMedia(ctx context.Context, name string, msg bus.Outboun
 	m.streamActive.LoadAndDelete(key)
 
 	if m.toolFeedbackSeparateMessagesEnabled() {
-		clearTrackedToolFeedbackMessage(ch, chatID, &msg.Context)
+		clearTrackedToolFeedbackMessage(ch, rawChatID, &msg.Context)
 	}
 
 	// 4. Delete placeholder if present.

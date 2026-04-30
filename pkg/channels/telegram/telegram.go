@@ -1165,6 +1165,10 @@ func (c *TelegramChannel) ToolFeedbackMessageChatID(chatID string, outboundCtx *
 	return telegramToolFeedbackChatKey(chatID, outboundCtx)
 }
 
+func (c *TelegramChannel) OutboundMessageChatID(chatID string, outboundCtx *bus.InboundContext) string {
+	return telegramToolFeedbackChatKey(chatID, outboundCtx)
+}
+
 // parseTelegramChatID splits "chatID/threadID" into its components.
 // Returns threadID=0 when no "/" is present (non-forum messages).
 func parseTelegramChatID(chatID string) (int64, int, error) {

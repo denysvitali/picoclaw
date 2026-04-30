@@ -44,4 +44,7 @@ type ChannelManager interface {
 
 	// SendPlaceholder sends a placeholder message (e.g., for audio transcription).
 	SendPlaceholder(ctx context.Context, channel, chatID string) bool
+
+	// GetStreamer returns a partial-response streamer for a channel/chat when supported.
+	GetStreamer(ctx context.Context, channel, chatID string) (bus.Streamer, bool)
 }

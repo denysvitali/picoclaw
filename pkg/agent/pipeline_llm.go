@@ -7,13 +7,129 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
+
+func (p *Pipeline) beginResponseStream(ctx context.Context, ts *turnState) (bus.Streamer, bool) {
+	if p == nil || p.ChannelManager == nil || ts == nil || !ts.opts.SendResponse {
+		return nil, false
+	}
+	if constants.IsInternalChannel(ts.channel) || ts.channel == "pico" {
+		return nil, false
+	}
+	return p.ChannelManager.GetStreamer(ctx, ts.channel, streamChatIDForTurn(ts))
+}
+
+func (p *Pipeline) chatWithResponseStream(
+	ctx context.Context,
+	ts *turnState,
+	provider providers.LLMProvider,
+	streamer bus.Streamer,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	options map[string]any,
+) (*providers.LLMResponse, error) {
+	streamingProvider, ok := provider.(providers.StreamingProvider)
+	if !ok || streamer == nil {
+		return provider.Chat(ctx, messages, tools, model, options)
+	}
+
+	lastContentLen := 0
+	resp, err := streamingProvider.ChatStream(ctx, messages, tools, model, options, func(accumulated string) {
+		if accumulated == "" {
+			return
+		}
+		contentDeltaLen := len(accumulated) - lastContentLen
+		if contentDeltaLen > 0 && p != nil && p.al != nil && ts != nil {
+			p.al.emitEvent(
+				EventKindLLMDelta,
+				ts.eventMeta("runTurn", "turn.llm.delta"),
+				LLMDeltaPayload{ContentDeltaLen: contentDeltaLen},
+			)
+		}
+		lastContentLen = len(accumulated)
+
+		updateCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		_ = streamer.Update(updateCtx, accumulated)
+	})
+	if err != nil {
+		streamer.Cancel(ctx)
+		return nil, err
+	}
+	if resp == nil {
+		streamer.Cancel(ctx)
+		return resp, nil
+	}
+	return resp, nil
+}
+
+func (p *Pipeline) finalizeResponseStream(ctx context.Context, ts *turnState, exec *turnExecution, content string) {
+	if exec == nil || exec.responseStreamer == nil {
+		return
+	}
+	streamer := exec.responseStreamer
+	exec.responseStreamer = nil
+
+	if strings.TrimSpace(content) == "" {
+		streamer.Cancel(ctx)
+		return
+	}
+
+	finalizeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := streamer.Finalize(finalizeCtx, content); err != nil {
+		logger.WarnCF("agent", "Response stream finalize failed; falling back to normal outbound", map[string]any{
+			"channel": ts.channel,
+			"chat_id": ts.chatID,
+			"error":   err.Error(),
+		})
+	}
+}
+
+func cancelResponseStream(ctx context.Context, exec *turnExecution) {
+	if exec == nil || exec.responseStreamer == nil {
+		return
+	}
+	exec.responseStreamer.Cancel(ctx)
+	exec.responseStreamer = nil
+}
+
+func streamChatIDForTurn(ts *turnState) string {
+	if ts == nil {
+		return ""
+	}
+	chatID := strings.TrimSpace(ts.chatID)
+	if chatID == "" || ts.opts.Dispatch.InboundContext == nil {
+		return chatID
+	}
+	inbound := ts.opts.Dispatch.InboundContext
+	if !strings.EqualFold(inbound.Channel, "telegram") {
+		return chatID
+	}
+	if len(inbound.Raw) > 0 && strings.TrimSpace(inbound.Raw["direct_messages_topic_id"]) != "" {
+		return chatID
+	}
+	topicID := strings.TrimSpace(inbound.TopicID)
+	if topicID == "" {
+		return chatID
+	}
+	if _, err := strconv.Atoi(topicID); err != nil {
+		return chatID
+	}
+	if strings.Contains(chatID, "/") {
+		return chatID
+	}
+	return chatID + "/" + topicID
+}
 
 // CallLLM performs an LLM call with fallback support, hook invocation, and retry logic.
 // It handles PreLLM setup, the actual LLM invocation with retry, and AfterLLM processing.
@@ -178,6 +294,24 @@ func (p *Pipeline) CallLLM(
 				)
 			}
 			return fbResult.Response, nil
+		}
+		if _, supportsStreaming := exec.activeProvider.(providers.StreamingProvider); supportsStreaming {
+			if streamer, ok := p.beginResponseStream(providerCtx, ts); ok {
+				resp, err := p.chatWithResponseStream(
+					providerCtx,
+					ts,
+					exec.activeProvider,
+					streamer,
+					messagesForCall,
+					toolDefsForCall,
+					exec.llmModel,
+					exec.llmOpts,
+				)
+				if err == nil && resp != nil {
+					exec.responseStreamer = streamer
+				}
+				return resp, err
+			}
 		}
 		return exec.activeProvider.Chat(providerCtx, messagesForCall, toolDefsForCall, exec.llmModel, exec.llmOpts)
 	}
@@ -364,9 +498,11 @@ func (p *Pipeline) CallLLM(
 				exec.response = llmResp.Response
 			}
 		case HookActionAbortTurn:
+			cancelResponseStream(turnCtx, exec)
 			exec.abortedByHook = true
 			return ControlBreak, nil
 		case HookActionHardAbort:
+			cancelResponseStream(turnCtx, exec)
 			_ = ts.requestHardAbort()
 			exec.abortedByHardAbort = true
 			return ControlBreak, nil
@@ -436,9 +572,11 @@ func (p *Pipeline) CallLLM(
 					"steering_count": len(steerMsgs),
 				})
 			exec.pendingMessages = append(exec.pendingMessages, steerMsgs...)
+			cancelResponseStream(turnCtx, exec)
 			return ControlContinue, nil
 		}
 		exec.finalContent = responseContent
+		p.finalizeResponseStream(turnCtx, ts, exec, responseContent)
 		logger.InfoCF("agent", "LLM response without tool calls (direct answer)",
 			map[string]any{
 				"agent_id":      ts.agent.ID,
@@ -447,6 +585,8 @@ func (p *Pipeline) CallLLM(
 			})
 		return ControlBreak, nil
 	}
+
+	cancelResponseStream(turnCtx, exec)
 
 	// Tool-call path: normalize and prepare for tool execution
 	exec.normalizedToolCalls = make([]providers.ToolCall, 0, len(exec.response.ToolCalls))

@@ -43,3 +43,7 @@ func (a *channelManagerAdapter) SendMedia(ctx context.Context, msg bus.OutboundM
 func (a *channelManagerAdapter) SendPlaceholder(ctx context.Context, channel, chatID string) bool {
 	return a.inner.SendPlaceholder(ctx, channel, chatID)
 }
+
+func (a *channelManagerAdapter) GetStreamer(ctx context.Context, channel, chatID string) (bus.Streamer, bool) {
+	return a.inner.GetStreamer(ctx, channel, chatID)
+}
